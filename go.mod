@@ -1,4 +1,4 @@
-module github.com/rexdotsh/discord_cdn_bypass
+module github.com/rexdotsh/discord-cdn
 
 go 1.23.3
 
