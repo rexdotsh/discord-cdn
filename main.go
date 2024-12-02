@@ -38,85 +38,44 @@ type RefreshURLsResponse struct {
 	} `json:"refreshed_urls"`
 }
 
-func main() {
-	config, err := getConfig()
-	if err != nil {
-		log.Fatalf("Error loading configuration: %v", err)
-	}
+type DiscordClient struct {
+	token  string
+	client *http.Client
+}
 
-	router := setupRouter(config)
-	log.Printf("Server is running on port %d", config.Port)
-	if err := router.Run(fmt.Sprintf(":%d", config.Port)); err != nil {
-		log.Fatalf("Server failed: %v", err)
+func NewDiscordClient(token string) *DiscordClient {
+	return &DiscordClient{
+		token:  token,
+		client: &http.Client{},
 	}
 }
 
-func setupRouter(config *Config) *gin.Engine {
-	router := gin.Default()
-	router.GET("/*encodedURL", handleURL(config))
-	return router
-}
-
-func handleURL(config *Config) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		encodedURL := strings.TrimPrefix(c.Param("encodedURL"), "/")
-		decodedURL, err := decodeURL(encodedURL)
-		if err != nil {
-			log.Printf("Failed to decode URL: %v", err)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid URL format"})
-			return
-		}
-
-		if decodedURL == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid URL format"})
-			return
-		}
-
-		newURL, err := fetchLatestLink(decodedURL, config.Token)
-		if err != nil {
-			log.Printf("Error fetching updated link: %v", err)
-			c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to fetch updated URL"})
-			return
-		}
-
-		c.Redirect(http.StatusMovedPermanently, newURL)
-	}
-}
-
-func fetchLatestLink(oldLink, token string) (string, error) {
-	link := parseLink(oldLink)
-	if link.Error != "" {
-		return "", fmt.Errorf(link.Error)
-	}
-
-	attachmentURL := fmt.Sprintf("https://cdn.discordapp.com/attachments/%d/%d/%s",
-		link.Data.ChannelID, link.Data.FileID, link.Data.FileName)
-
-	requestBody := map[string]interface{}{
+func (c *DiscordClient) RefreshAttachmentURL(attachmentURL string) (string, error) {
+	body := map[string]interface{}{
 		"attachment_urls": []string{attachmentURL},
 	}
 
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://discord.com/api/v9/attachments/refresh-urls", bytes.NewBuffer(bodyBytes))
+	req, err := http.NewRequest(http.MethodPost, "https://discord.com/api/v9/attachments/refresh-urls", bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", c.token)
+
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return "", fmt.Errorf("discord API error: %d", resp.StatusCode)
 	}
 
 	var refreshResponse RefreshURLsResponse
@@ -131,15 +90,62 @@ func fetchLatestLink(oldLink, token string) (string, error) {
 	return refreshResponse.RefreshedURLs[0].Refreshed, nil
 }
 
-func parseLink(input string) *ParsedLink {
-	if strings.Contains(input, "?") {
-		input = strings.Split(input, "?")[0]
-	}
-	if strings.Contains(input, "attachments/") {
-		input = strings.Split(input, "attachments/")[1]
+func main() {
+	config, err := loadConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	discordClient := NewDiscordClient(config.Token)
+	router := gin.Default()
+	router.GET("/*encodedURL", handleURL(discordClient))
+
+	addr := fmt.Sprintf(":%d", config.Port)
+	log.Printf("Server starting on %s", addr)
+	if err := router.Run(addr); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
+}
+
+func handleURL(client *DiscordClient) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		encodedURL := strings.TrimPrefix(c.Param("encodedURL"), "/")
+		if encodedURL == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "URL is required"})
+			return
+		}
+
+		decodedURL, err := url.PathUnescape(encodedURL)
+		if err != nil {
+			log.Printf("Failed to decode URL: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid URL format"})
+			return
+		}
+
+		parsedLink := parseLink(decodedURL)
+		if parsedLink.Error != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": parsedLink.Error})
+			return
+		}
+
+		attachmentURL := fmt.Sprintf("https://cdn.discordapp.com/attachments/%d/%d/%s",
+			parsedLink.Data.ChannelID, parsedLink.Data.FileID, parsedLink.Data.FileName)
+
+		newURL, err := client.RefreshAttachmentURL(attachmentURL)
+		if err != nil {
+			log.Printf("Error refreshing attachment URL: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to refresh URL"})
+			return
+		}
+
+		c.Redirect(http.StatusMovedPermanently, newURL)
+	}
+}
+
+func parseLink(input string) *ParsedLink {
+	input = cleanURL(input)
 	parts := strings.Split(input, "/")
+
 	if len(parts) != 3 {
 		return &ParsedLink{Error: "Invalid link format"}
 	}
@@ -155,7 +161,7 @@ func parseLink(input string) *ParsedLink {
 	}
 
 	if !strings.Contains(parts[2], ".") {
-		return &ParsedLink{Error: "File name must include a file extension"}
+		return &ParsedLink{Error: "File name must include extension"}
 	}
 
 	return &ParsedLink{
@@ -167,9 +173,19 @@ func parseLink(input string) *ParsedLink {
 	}
 }
 
-func getConfig() (*Config, error) {
+func cleanURL(url string) string {
+	if idx := strings.Index(url, "?"); idx != -1 {
+		url = url[:idx]
+	}
+	if idx := strings.Index(url, "attachments/"); idx != -1 {
+		url = url[idx+len("attachments/"):]
+	}
+	return url
+}
+
+func loadConfig() (*Config, error) {
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using system environment variables.")
+		// continue with environment variables
 	}
 
 	port, err := strconv.Atoi(getEnv("PORT", "8080"))
@@ -177,20 +193,20 @@ func getConfig() (*Config, error) {
 		return nil, fmt.Errorf("invalid port value: %w", err)
 	}
 
+	token := getEnv("TOKEN", "")
+	if token == "" {
+		return nil, fmt.Errorf("discord token is required")
+	}
+
 	return &Config{
-		Token: getEnv("TOKEN", ""),
+		Token: token,
 		Port:  port,
 	}, nil
 }
 
-func decodeURL(encodedURL string) (string, error) {
-	return url.PathUnescape(encodedURL)
-}
-
 func getEnv(key, fallback string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return fallback
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
-	return value
+	return fallback
 }
