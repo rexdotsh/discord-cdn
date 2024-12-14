@@ -12,7 +12,7 @@ Original URL:
 https://cdn.discordapp.com/attachments/123456789/987654321/image.png
 ```
 
-Using the bypass:
+Using the server:
 
 ```
 http://localhost:8080/https://cdn.discordapp.com/attachments/123456789/987654321/image.png
