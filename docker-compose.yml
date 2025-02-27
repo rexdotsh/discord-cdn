@@ -1,5 +1,6 @@
 services:
   discord-cdn:
+    name: discord-cdn
     build:
       context: .
       dockerfile: Dockerfile
