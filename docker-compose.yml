@@ -1,0 +1,13 @@
+services:
+  discord-cdn:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - TOKEN=${TOKEN}
+      - PORT=8080
+    restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env:ro
